@@ -90,7 +90,7 @@ blather             BLAT          Messages useful for developers trying to
 Activity Log Rotation
 ~~~~~~~~~~~~~~~~~~~~~
 
-The activity log is "rotated" by :program:`supervisord`` based on the
+The activity log is "rotated" by :program:`supervisord` based on the
 combination of the ``logfile_maxbytes`` and the ``logfile_backups``
 parameters in the ``[supervisord]`` section of the configuration file.
 When the activity log reaches ``logfile_maxbytes`` bytes, the current
@@ -140,8 +140,8 @@ The configuration keys that influence child process logging in
 ``stderr_syslog``.
 
 ``[eventlistener:x]`` sections may not specify
-``stdout_capture_maxbytes`` or ``stderr_capture_maxbytes``,
-but otherwise they accept the same values.
+``redirect_stderr``, ``stdout_capture_maxbytes``, or
+``stderr_capture_maxbytes``, but otherwise they accept the same values.
 
 The configuration keys that influence child process logging in the
 ``[supervisord]`` config file section are these:

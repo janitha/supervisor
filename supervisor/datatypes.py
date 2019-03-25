@@ -2,40 +2,27 @@ import grp
 import os
 import pwd
 import signal
-import sys
 import socket
 import shlex
-import urlparse
+
+from supervisor.compat import urlparse
+from supervisor.compat import long
 from supervisor.loggers import getLevelNumByDescription
-
-# I dont know why we bother, this doesn't run on Windows, but just
-# in case it ever does, avoid this bug magnet by leaving it.
-if sys.platform[:3] == "win": # pragma: no cover
-    DEFAULT_HOST = "localhost"
-else:
-    DEFAULT_HOST = ""
-
-here = None
-
-def set_here(v):
-    global here
-    here = v
 
 def process_or_group_name(name):
     """Ensures that a process or group name is not created with
-       characters that break the eventlistener protocol"""
+       characters that break the eventlistener protocol or web UI URLs"""
     s = str(name).strip()
-    if ' ' in s or ':' in s:
-        raise ValueError("Invalid name: " + repr(name))
+    for character in ' :/':
+        if character in s:
+            raise ValueError("Invalid name: %r because of character: %r" % (name, character))
     return s
 
 def integer(value):
     try:
         return int(value)
-    except ValueError:
-        return long(value) # why does this help? (CM)
-    except OverflowError:
-        return long(value)
+    except (ValueError, OverflowError):
+        return long(value) # why does this help ValueError? (CM)
 
 TRUTHY_STRINGS = ('yes', 'true', 'on', '1')
 FALSY_STRINGS  = ('no', 'false', 'off', '0')
@@ -63,7 +50,7 @@ def list_of_ints(arg):
         return []
     else:
         try:
-            return map(int, arg.split(","))
+            return list(map(int, arg.split(",")))
         except:
             raise ValueError("not a valid list of ints: " + repr(arg))
 
@@ -81,7 +68,7 @@ def dict_of_key_value_pairs(arg):
     """ parse KEY=val,KEY2=val2 into {'KEY':'val', 'KEY2':'val2'}
         Quotes can be used to allow commas in the value
     """
-    lexer = shlex.shlex(arg)
+    lexer = shlex.shlex(str(arg))
     lexer.wordchars += '/.+-():'
 
     tokens = list(lexer)
@@ -92,7 +79,8 @@ def dict_of_key_value_pairs(arg):
     while i < tokens_len:
         k_eq_v = tokens[i:i+3]
         if len(k_eq_v) != 3 or k_eq_v[1] != '=':
-            raise ValueError("Unexpected end of key/value pairs")
+            raise ValueError(
+                "Unexpected end of key/value pairs in value '%s'" % arg)
         D[k_eq_v[0]] = k_eq_v[2].strip('\'"')
         i += 4
     return D
@@ -119,9 +107,9 @@ def logfile_name(val):
 class RangeCheckedConversion:
     """Conversion helper that range checks another conversion."""
 
-    def __init__(self, conversion, rmin=None, rmax=None):
-        self._min = rmin
-        self._max = rmax
+    def __init__(self, conversion, min=None, max=None):
+        self._min = min
+        self._max = max
         self._conversion = conversion
 
     def __call__(self, value):
@@ -134,12 +122,11 @@ class RangeCheckedConversion:
                              % (repr(v), repr(self._max)))
         return v
 
-port_number = RangeCheckedConversion(integer, rmin=1, rmax=0xffff).__call__
+port_number = RangeCheckedConversion(integer, min=1, max=0xffff).__call__
 
 def inet_address(s):
     # returns (host, port) tuple
     host = ''
-    port = None
     if ":" in s:
         host, s = s.split(":", 1)
         if not s:
@@ -152,7 +139,7 @@ def inet_address(s):
         except ValueError:
             raise ValueError("not a valid port number: %r " %s)
     if not host or host == '*':
-        host = DEFAULT_HOST
+        host = ''
     return host, port
 
 class SocketAddress:
@@ -209,12 +196,16 @@ class InetStreamSocketConfig(SocketConfig):
         self.url = 'tcp://%s:%d' % (self.host, self.port)
 
     def addr(self):
-        return (self.host, self.port)
+        return self.host, self.port
 
     def create_and_bind(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(self.addr())
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(self.addr())
+        except:
+            sock.close()
+            raise
         return sock
 
 class UnixStreamSocketConfig(SocketConfig):
@@ -227,7 +218,7 @@ class UnixStreamSocketConfig(SocketConfig):
 
     def __init__(self, path, **kwargs):
         self.path = path
-        self.url = 'unix://%s' % (path)
+        self.url = 'unix://%s' % path
         self.mode = kwargs.get('mode', None)
         self.owner = kwargs.get('owner', None)
 
@@ -238,13 +229,14 @@ class UnixStreamSocketConfig(SocketConfig):
         if os.path.exists(self.path):
             os.unlink(self.path)
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.bind(self.addr())
         try:
+            sock.bind(self.addr())
             self._chown()
             self._chmod()
         except:
             sock.close()
-            os.unlink(self.path)
+            if os.path.exists(self.path):
+                os.unlink(self.path)
             raise
         return sock
 
@@ -258,17 +250,17 @@ class UnixStreamSocketConfig(SocketConfig):
         if self.mode is not None:
             try:
                 os.chmod(self.path, self.mode)
-            except Exception, e:
+            except Exception as e:
                 raise ValueError("Could not change permissions of socket "
-                                    + "file: %s" % (e))
+                                    + "file: %s" % e)
 
     def _chown(self):
         if self.owner is not None:
             try:
                 os.chown(self.path, self.owner[0], self.owner[1])
-            except Exception, e:
+            except Exception as e:
                 raise ValueError("Could not change ownership of socket file: "
-                                    + "%s" % (e))
+                                    + "%s" % e)
 
 def colon_separated_user_group(arg):
     """ Find a user ID and group ID from a string like 'user:group'.  Returns
@@ -332,19 +324,17 @@ def gid_for_uid(uid):
 def octal_type(arg):
     try:
         return int(arg, 8)
-    except TypeError:
+    except (TypeError, ValueError):
         raise ValueError('%s can not be converted to an octal type' % arg)
 
 def existing_directory(v):
-    nv = v % {'here':here}
-    nv = os.path.expanduser(nv)
+    nv = os.path.expanduser(v)
     if os.path.isdir(nv):
         return nv
     raise ValueError('%s is not an existing directory' % v)
 
 def existing_dirpath(v):
-    nv = v % {'here':here}
-    nv = os.path.expanduser(nv)
+    nv = os.path.expanduser(v)
     dir = os.path.dirname(nv)
     if not dir:
         # relative pathname with no directory component
@@ -352,7 +342,7 @@ def existing_dirpath(v):
     if os.path.isdir(dir):
         return nv
     raise ValueError('The directory named as part of the path %s '
-                     'does not exist.' % v)
+                     'does not exist' % v)
 
 def logging_level(value):
     s = str(value).lower()
@@ -385,7 +375,7 @@ class SuffixMultiplier:
 
 byte_size = SuffixMultiplier({'kb': 1024,
                               'mb': 1024*1024,
-                              'gb': 1024*1024*1024L,})
+                              'gb': 1024*1024*long(1024),})
 
 def url(value):
     # earlier Python 2.6 urlparse (2.6.4 and under) can't parse unix:// URLs,
@@ -394,19 +384,24 @@ def url(value):
     scheme, netloc, path, params, query, fragment = urlparse.urlparse(uri)
     if scheme and (netloc or path):
         return value
-    raise ValueError("value %s is not a URL" % value)
+    raise ValueError("value %r is not a URL" % value)
+
+# all valid signal numbers
+SIGNUMS = [ getattr(signal, k) for k in dir(signal) if k.startswith('SIG') ]
 
 def signal_number(value):
-    result = None
     try:
-        result = int(value)
+        num = int(value)
     except (ValueError, TypeError):
-        result = getattr(signal, 'SIG'+value, None)
-    try:
-        result = int(result)
-        return result
-    except (ValueError, TypeError):
-        raise ValueError('value %s is not a signal name/number' % value)
+        name = value.strip().upper()
+        if not name.startswith('SIG'):
+            name = 'SIG' + name
+        num = getattr(signal, name, None)
+        if num is None:
+            raise ValueError('value %r is not a valid signal name' % value)
+    if num not in SIGNUMS:
+        raise ValueError('value %r is not a valid signal number' % value)
+    return num
 
 class RestartWhenExitUnexpected:
     pass

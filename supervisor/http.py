@@ -4,18 +4,18 @@ import time
 import sys
 import socket
 import errno
-import urllib
+import weakref
+import traceback
 
 try:
     import pwd
 except ImportError:  # Windows
     import getpass as pwd
 
-try:
-    from hashlib import sha1
-except ImportError:  # Python 2.4 or earlier
-    from sha import new as sha1
-
+from supervisor.compat import urllib
+from supervisor.compat import sha1
+from supervisor.compat import as_bytes
+from supervisor.compat import as_string
 from supervisor.medusa import asyncore_25 as asyncore
 from supervisor.medusa import http_date
 from supervisor.medusa import http_server
@@ -49,18 +49,19 @@ class deferring_chunked_producer:
             if data is NOT_DONE_YET:
                 return NOT_DONE_YET
             elif data:
-                return '%x\r\n%s\r\n' % (len(data), data)
+                s = '%x' % len(data)
+                return as_bytes(s) + b'\r\n' + data + b'\r\n'
             else:
                 self.producer = None
                 if self.footers:
-                    return '\r\n'.join(['0'] + self.footers) + '\r\n\r\n'
+                    return b'\r\n'.join([b'0'] + self.footers) + b'\r\n\r\n'
                 else:
-                    return '0\r\n\r\n'
+                    return b'0\r\n\r\n'
         else:
-            return ''
+            return b''
 
 class deferring_composite_producer:
-    "combine a fifo of producers into one"
+    """combine a fifo of producers into one"""
     def __init__ (self, producers):
         self.producers = producers
         self.delay = 0.1
@@ -76,7 +77,7 @@ class deferring_composite_producer:
             else:
                 self.producers.pop(0)
         else:
-            return ''
+            return b''
 
 
 class deferring_globbing_producer:
@@ -88,7 +89,7 @@ class deferring_globbing_producer:
 
     def __init__ (self, producer, buffer_size=1<<16):
         self.producer = producer
-        self.buffer = ''
+        self.buffer = b''
         self.buffer_size = buffer_size
         self.delay = 0.1
 
@@ -98,11 +99,14 @@ class deferring_globbing_producer:
             if data is NOT_DONE_YET:
                 return NOT_DONE_YET
             if data:
-                self.buffer = self.buffer + data
+                try:
+                    self.buffer = self.buffer + data
+                except TypeError:
+                    self.buffer = as_bytes(self.buffer) + as_bytes(data)
             else:
                 break
         r = self.buffer
-        self.buffer = ''
+        self.buffer = b''
         return r
 
 
@@ -128,10 +132,10 @@ class deferring_hooked_producer:
                 self.producer = None
                 self.function (self.bytes)
             else:
-                self.bytes = self.bytes + len(result)
+                self.bytes += len(result)
             return result
         else:
-            return ''
+            return b''
 
 
 class deferring_http_request(http_server.http_request):
@@ -139,24 +143,6 @@ class deferring_http_request(http_server.http_request):
     medusa.producers.  We can't use these because they don't know anything
     about deferred responses, so we override various methods here.  This was
     added to support tail -f like behavior on the logtail handler """
-
-    def get_header(self, header):
-        # this is overridden purely for speed (the base class doesn't
-        # use string methods
-        header = header.lower()
-        hc = self._header_cache
-        if not hc.has_key(header):
-            h = header + ': '
-            for line in self.header:
-                if line.lower().startswith(h):
-                    hl = len(h)
-                    r = line[hl:]
-                    hc[header] = r
-                    return r
-            hc[header] = None
-            return None
-        else:
-            return hc[header]
 
     def done(self, *arg, **kw):
 
@@ -180,7 +166,7 @@ class deferring_http_request(http_server.http_request):
 
         if self.version == '1.0':
             if connection == 'keep-alive':
-                if not self.has_key ('Content-Length'):
+                if not 'Content-Length' in self:
                     close_it = 1
                 else:
                     self['Connection'] = 'Keep-Alive'
@@ -189,8 +175,8 @@ class deferring_http_request(http_server.http_request):
         elif self.version == '1.1':
             if connection == 'close':
                 close_it = 1
-            elif not self.has_key('Content-Length'):
-                if self.has_key('Transfer-Encoding'):
+            elif not 'Content-Length' in self:
+                if 'Transfer-Encoding' in self:
                     if not self['Transfer-Encoding'] == 'chunked':
                         close_it = 1
                 elif self.use_chunked:
@@ -306,11 +292,11 @@ class deferring_http_request(http_server.http_request):
             key,value=header.split(":",1)
             key=key.lower()
             value=value.strip()
-            if header2env.has_key(key) and value:
+            if key in header2env and value:
                 env[header2env.get(key)]=value
             else:
                 key='HTTP_%s' % ("_".join(key.split( "-"))).upper()
-                if value and not env.has_key(key):
+                if value and key not in env:
                     env[key]=value
         return env
 
@@ -327,14 +313,14 @@ class deferring_http_request(http_server.http_request):
         else:
             protocol = 'http'
 
-        if environ.has_key('HTTP_HOST'):
+        if 'HTTP_HOST' in environ:
             host = environ['HTTP_HOST'].strip()
             hostname, port = urllib.splitport(host)
         else:
             hostname = environ['SERVER_NAME'].strip()
             port = environ['SERVER_PORT']
 
-        if (port is None or default_port[protocol] == port):
+        if port is None or default_port[protocol] == port:
             host = hostname
         else:
             host = hostname + ':' + port
@@ -349,17 +335,18 @@ class deferring_http_channel(http_server.http_channel):
     # order to spew tail -f output faster (speculative)
     ac_out_buffer_size = 4096
 
-    delay = False
-    writable_check = time.time()
+    delay = 0 # seconds
+    last_writable_check = 0 # timestamp of last writable check; 0 if never
 
-    def writable(self, t=time.time):
-        now = t()
+    def writable(self, now=None):
+        if now is None:  # for unit tests
+            now = time.time()
+
         if self.delay:
             # we called a deferred producer via this channel (see refill_buffer)
-            last_writable_check = self.writable_check
-            self.writable_check = now
-            elapsed = now - last_writable_check
-            if elapsed > self.delay:
+            elapsed = now - self.last_writable_check
+            if (elapsed > self.delay) or (elapsed < 0):
+                self.last_writable_check = now
                 return True
             else:
                 return False
@@ -378,9 +365,9 @@ class deferring_http_channel(http_server.http_channel):
                         self.producer_fifo.pop()
                         self.close()
                     return
-                elif isinstance(p, str):
+                elif isinstance(p, bytes):
                     self.producer_fifo.pop()
-                    self.ac_out_buffer = self.ac_out_buffer + p
+                    self.ac_out_buffer += p
                     return
 
                 data = p.more()
@@ -405,8 +392,11 @@ class deferring_http_channel(http_server.http_channel):
         if self.current_request:
             self.current_request.found_terminator()
         else:
-            header = self.in_buffer
-            self.in_buffer = ''
+            # we convert the header to text to facilitate processing.
+            # some of the underlying APIs (such as splitquery)
+            # expect text rather than bytes.
+            header = as_string(self.in_buffer)
+            self.in_buffer = b''
             lines = header.split('\r\n')
 
             # --------------------------------------------------
@@ -434,12 +424,12 @@ class deferring_http_channel(http_server.http_channel):
             rpath, rquery = http_server.splitquery(uri)
             if '%' in rpath:
                 if rquery:
-                    uri = http_server.unquote (rpath) + '?' + rquery
+                    uri = http_server.unquote(rpath) + '?' + rquery
                 else:
-                    uri = http_server.unquote (rpath)
+                    uri = http_server.unquote(rpath)
 
-            r = deferring_http_request (self, request, command, uri, version,
-                                         header)
+            r = deferring_http_request(self, request, command, uri, version,
+                                       header)
             self.request_counter.increment()
             self.server.total_requests.increment()
 
@@ -538,7 +528,6 @@ class supervisor_af_inet_http_server(supervisor_http_server):
         self.prebind(sock, logger_object)
         self.bind((ip, port))
 
-        host, port = self.socket.getsockname()
         if not ip:
             self.log_info('Computing default hostname', 'warning')
             hostname = socket.gethostname()
@@ -607,7 +596,7 @@ class supervisor_af_unix_http_server(supervisor_http_server):
                 else:
                     try:
                         os.chown(socketname, sockchown[0], sockchown[1])
-                    except OSError, why:
+                    except OSError as why:
                         if why.args[0] == errno.EPERM:
                             msg = ('Not permitted to chown %s to uid/gid %s; '
                                    'adjust "sockchown" value in config file or '
@@ -637,8 +626,8 @@ class supervisor_af_unix_http_server(supervisor_http_server):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             s.connect(socketname)
-            s.send("GET / HTTP/1.0\r\n\r\n")
-            data = s.recv(1)
+            s.send(as_bytes("GET / HTTP/1.0\r\n\r\n"))
+            s.recv(1)
             s.close()
         except socket.error:
             return False
@@ -647,21 +636,25 @@ class supervisor_af_unix_http_server(supervisor_http_server):
 
 class tail_f_producer:
     def __init__(self, request, filename, head):
-        self.file = open(filename, 'rb')
-        self.request = request
+        self.request = weakref.ref(request)
+        self.filename = filename
         self.delay = 0.1
-        sz = self.fsize()
+
+        self._open()
+        sz = self._fsize()
         if sz >= head:
             self.sz = sz - head
-        else:
-            self.sz = 0
+
+    def __del__(self):
+        self._close()
 
     def more(self):
+        self._follow()
         try:
-            newsz = self.fsize()
-        except OSError:
+            newsz = self._fsize()
+        except (OSError, ValueError):
             # file descriptor was closed
-            return ''
+            return b''
         bytes_added = newsz - self.sz
         if bytes_added < 0:
             self.sz = 0
@@ -673,7 +666,26 @@ class tail_f_producer:
             return bytes
         return NOT_DONE_YET
 
-    def fsize(self):
+    def _open(self):
+        self.file = open(self.filename, 'rb')
+        self.ino = os.fstat(self.file.fileno())[stat.ST_INO]
+        self.sz = 0
+
+    def _close(self):
+        self.file.close()
+
+    def _follow(self):
+        try:
+            ino = os.stat(self.filename)[stat.ST_INO]
+        except (OSError, ValueError):
+            # file was unlinked
+            return
+
+        if self.ino != ino: # log rotation occurred
+            self._close()
+            self._open()
+
+    def _fsize(self):
         return os.fstat(self.file.fileno())[stat.ST_SIZE]
 
 class logtail_handler:
@@ -733,7 +745,7 @@ class logtail_handler:
 
         mtime = os.stat(logfile)[stat.ST_MTIME]
         request['Last-Modified'] = http_date.build_http_date(mtime)
-        request['Content-Type'] = 'text/plain'
+        request['Content-Type'] = 'text/plain;charset=utf-8'
         # the lack of a Content-Length header makes the outputter
         # send a 'Transfer-Encoding: chunked' response
 
@@ -764,7 +776,7 @@ class mainlogtail_handler:
 
         mtime = os.stat(logfile)[stat.ST_MTIME]
         request['Last-Modified'] = http_date.build_http_date(mtime)
-        request['Content-Type'] = 'text/plain'
+        request['Content-Type'] = 'text/plain;charset=utf-8'
         # the lack of a Content-Length header makes the outputter
         # send a 'Transfer-Encoding: chunked' response
 
@@ -774,12 +786,7 @@ class mainlogtail_handler:
 
 def make_http_servers(options, supervisord):
     servers = []
-    class LogWrapper:
-        def log(self, msg):
-            if msg.endswith('\n'):
-                msg = msg[:-1]
-            options.logger.trace(msg)
-    wrapper = LogWrapper()
+    wrapper = LogWrapper(options.logger)
 
     for config in options.server_configs:
         family = config['family']
@@ -797,16 +804,17 @@ def make_http_servers(options, supervisord):
         else:
             raise ValueError('Cannot determine socket type %r' % family)
 
-        from xmlrpc import supervisor_xmlrpc_handler
-        from xmlrpc import SystemNamespaceRPCInterface
-        from web import supervisor_ui_handler
+        from supervisor.xmlrpc import supervisor_xmlrpc_handler
+        from supervisor.xmlrpc import SystemNamespaceRPCInterface
+        from supervisor.web import supervisor_ui_handler
 
         subinterfaces = []
         for name, factory, d in options.rpcinterface_factories:
             try:
                 inst = factory(supervisord, **d)
             except:
-                import traceback; traceback.print_exc()
+                tb = traceback.format_exc()
+                options.logger.warn(tb)
                 raise ValueError('Could not make %s rpc interface' % name)
             subinterfaces.append((name, inst))
             options.logger.info('RPC interface %r initialized' % name)
@@ -849,16 +857,33 @@ def make_http_servers(options, supervisord):
 
     return servers
 
+class LogWrapper:
+    '''Receives log messages from the Medusa servers and forwards
+    them to the Supervisor logger'''
+    def __init__(self, logger):
+        self.logger = logger
+
+    def log(self, msg):
+        '''Medusa servers call this method.  There is no log level so
+        we have to sniff the message.  We want "Server Error" messages
+        from medusa.http_server logged as errors at least.'''
+        if msg.endswith('\n'):
+            msg = msg[:-1]
+        if 'error' in msg.lower():
+            self.logger.error(msg)
+        else:
+            self.logger.trace(msg)
+
 class encrypted_dictionary_authorizer:
     def __init__ (self, dict):
         self.dict = dict
 
     def authorize(self, auth_info):
         username, password = auth_info
-        if self.dict.has_key(username):
+        if username in self.dict:
             stored_password = self.dict[username]
             if stored_password.startswith('{SHA}'):
-                password_hash = sha1(password).hexdigest()
+                password_hash = sha1(as_bytes(password)).hexdigest()
                 return stored_password[5:] == password_hash
             else:
                 return stored_password == password
@@ -870,4 +895,3 @@ class supervisor_auth_handler(auth_handler):
         auth_handler.__init__(self, dict, handler, realm)
         # override the authorizer with one that knows about SHA hashes too
         self.authorizer = encrypted_dictionary_authorizer(dict)
-

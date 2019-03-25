@@ -1,10 +1,14 @@
 from supervisor.states import getProcessStateDescription
+from supervisor.compat import as_string
 
 callbacks = []
 
 def subscribe(type, callback):
     callbacks.append((type, callback))
-    
+
+def unsubscribe(type, callback):
+    callbacks.remove((type, callback))
+
 def notify(event):
     for type, callback in callbacks:
         if isinstance(event, type):
@@ -19,21 +23,28 @@ class Event:
 
 class ProcessLogEvent(Event):
     """ Abstract """
+    channel = None
     def __init__(self, process, pid, data):
         self.process = process
         self.pid = pid
         self.data = data
 
-    def __str__(self):
+    def payload(self):
         groupname = ''
         if self.process.group is not None:
             groupname = self.process.group.config.name
-        return 'processname:%s groupname:%s pid:%s channel:%s\n%s' % (
-            self.process.config.name,
-            groupname,
-            self.pid,
-            self.channel,
-            self.data)
+        try:
+            data = as_string(self.data)
+        except UnicodeDecodeError:
+            data = 'Undecodable: %r' % self.data
+        # On Python 2, stuff needs to be in Unicode before invoking the
+        # % operator, otherwise implicit encodings to ASCII can cause
+        # failures
+        fmt = as_string('processname:%s groupname:%s pid:%s channel:%s\n%s')
+        result = fmt % (as_string(self.process.config.name),
+                        as_string(groupname), self.pid,
+                        as_string(self.channel), data)
+        return result
 
 class ProcessLogStdoutEvent(ProcessLogEvent):
     channel = 'stdout'
@@ -44,23 +55,27 @@ class ProcessLogStderrEvent(ProcessLogEvent):
 class ProcessCommunicationEvent(Event):
     """ Abstract """
     # event mode tokens
-    BEGIN_TOKEN = '<!--XSUPERVISOR:BEGIN-->'
-    END_TOKEN   = '<!--XSUPERVISOR:END-->'
+    BEGIN_TOKEN = b'<!--XSUPERVISOR:BEGIN-->'
+    END_TOKEN   = b'<!--XSUPERVISOR:END-->'
 
     def __init__(self, process, pid, data):
         self.process = process
         self.pid = pid
         self.data = data
 
-    def __str__(self):
+    def payload(self):
         groupname = ''
         if self.process.group is not None:
             groupname = self.process.group.config.name
+        try:
+            data = as_string(self.data)
+        except UnicodeDecodeError:
+            data = 'Undecodable: %r' % self.data
         return 'processname:%s groupname:%s pid:%s\n%s' % (
             self.process.config.name,
             groupname,
             self.pid,
-            self.data)
+            data)
 
 class ProcessCommunicationStdoutEvent(ProcessCommunicationEvent):
     channel = 'stdout'
@@ -73,12 +88,12 @@ class RemoteCommunicationEvent(Event):
         self.type = type
         self.data = data
 
-    def __str__(self):
+    def payload(self):
         return 'type:%s\n%s' % (self.type, self.data)
 
 class SupervisorStateChangeEvent(Event):
     """ Abstract class """
-    def __str__(self):
+    def payload(self):
         return ''
 
 class SupervisorRunningEvent(SupervisorStateChangeEvent):
@@ -87,7 +102,7 @@ class SupervisorRunningEvent(SupervisorStateChangeEvent):
 class SupervisorStoppingEvent(SupervisorStateChangeEvent):
     pass
 
-class EventRejectedEvent: # purposely does not subclass Event 
+class EventRejectedEvent: # purposely does not subclass Event
     def __init__(self, process, event):
         self.process = process
         self.event = event
@@ -104,14 +119,12 @@ class ProcessStateEvent(Event):
         # us, we stash the values at the time the event was sent
         self.extra_values = self.get_extra_values()
 
-    def __str__(self):
+    def payload(self):
         groupname = ''
         if self.process.group is not None:
             groupname = self.process.group.config.name
-        L = []
-        L.append(('processname',  self.process.config.name))
-        L.append(('groupname', groupname))
-        L.append(('from_state', getProcessStateDescription(self.from_state)))
+        L = [('processname', self.process.config.name), ('groupname', groupname),
+             ('from_state', getProcessStateDescription(self.from_state))]
         L.extend(self.extra_values)
         s = ' '.join( [ '%s:%s' % (name, val) for (name, val) in L ] )
         return s
@@ -151,13 +164,26 @@ class ProcessStateStoppedEvent(ProcessStateEvent):
     def get_extra_values(self):
         return [('pid', self.process.pid)]
 
+class ProcessGroupEvent(Event):
+    def __init__(self, group):
+        self.group = group
+
+    def payload(self):
+        return 'groupname:%s\n' % self.group
+
+class ProcessGroupAddedEvent(ProcessGroupEvent):
+    pass
+
+class ProcessGroupRemovedEvent(ProcessGroupEvent):
+    pass
+
 class TickEvent(Event):
     """ Abstract """
     def __init__(self, when, supervisord):
         self.when = when
         self.supervisord = supervisord
 
-    def __str__(self):
+    def payload(self):
         return 'when:%s' % self.when
 
 class Tick5Event(TickEvent):
@@ -187,7 +213,7 @@ class EventTypes:
     PROCESS_COMMUNICATION_STDERR = ProcessCommunicationStderrEvent
     PROCESS_LOG = ProcessLogEvent
     PROCESS_LOG_STDOUT = ProcessLogStdoutEvent
-    PROCESS_LOG_STDERR = ProcessLogStderrEvent     
+    PROCESS_LOG_STDERR = ProcessLogStderrEvent
     REMOTE_COMMUNICATION = RemoteCommunicationEvent
     SUPERVISOR_STATE_CHANGE = SupervisorStateChangeEvent # abstract
     SUPERVISOR_STATE_CHANGE_RUNNING = SupervisorRunningEvent
@@ -196,6 +222,9 @@ class EventTypes:
     TICK_5 = Tick5Event
     TICK_60 = Tick60Event
     TICK_3600 = Tick3600Event
+    PROCESS_GROUP = ProcessGroupEvent # abstract
+    PROCESS_GROUP_ADDED = ProcessGroupAddedEvent
+    PROCESS_GROUP_REMOVED = ProcessGroupRemovedEvent
 
 def getEventNameByType(requested):
     for name, typ in EventTypes.__dict__.items():
@@ -203,4 +232,4 @@ def getEventNameByType(requested):
             return name
 
 def register(name, event):
-    EventTypes.__dict__[name] = event
+    setattr(EventTypes, name, event)

@@ -31,6 +31,15 @@ class DeferredWebProducerTests(unittest.TestCase):
         producer = self._makeOne(request, callback)
         self.assertEqual(producer.more(), NOT_DONE_YET)
 
+    def test_more_finished(self):
+        request = DummyRequest('/index.html', [], '', '')
+        callback = lambda *x: 'done'
+        callback.delay = 1
+        producer = self._makeOne(request, callback)
+        self.assertEqual(producer.more(), None)
+        self.assertTrue(producer.finished)
+        self.assertEqual(producer.more(), '')
+
     def test_more_exception_caught(self):
         request = DummyRequest('/index.html', [], '', '')
         def callback(*arg):
@@ -85,7 +94,7 @@ class UIHandlerTests(unittest.TestCase):
         handler = self._makeOne()
         data = handler.handle_request(request)
         self.assertEqual(data, None)
-        
+
     def test_handle_request_default(self):
         request = DummyRequest('/index.html', [], '', '',
                                {'PATH_INFO':'/index.html'})
@@ -100,7 +109,7 @@ class UIHandlerTests(unittest.TestCase):
         request = DummyRequest('/index.html', [], '', '',
                                {'PATH_INFO':'/index.html'})
         handler = self._makeOne()
-        data = handler.handle_request(request)
+        handler.handle_request(request)
         from supervisor.web import StatusView
         view = request.channel.producer.callback
         self.assertEqual(view.__class__, StatusView)
@@ -110,7 +119,7 @@ class UIHandlerTests(unittest.TestCase):
         request = DummyRequest('/tail.html', [], '', '',
                                {'PATH_INFO':'/tail.html'})
         handler = self._makeOne()
-        data = handler.handle_request(request)
+        handler.handle_request(request)
         from supervisor.web import TailView
         view = request.channel.producer.callback
         self.assertEqual(view.__class__, TailView)
@@ -120,7 +129,7 @@ class UIHandlerTests(unittest.TestCase):
         request = DummyRequest('/tail.html', [], '', '',
                                {'PATH_INFO':'/ok.html'})
         handler = self._makeOne()
-        data = handler.handle_request(request)
+        handler.handle_request(request)
         from supervisor.web import OKView
         view = request.channel.producer.callback
         self.assertEqual(view.__class__, OKView)

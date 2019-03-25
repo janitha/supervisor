@@ -11,11 +11,11 @@ For example, you can feed dynamically-produced output into the compressing
 producer, then wrap this with the 'chunked' transfer-encoding producer.
 """
 
-import string
 from asynchat import find_prefix_at_end
+from supervisor.compat import as_bytes
 
 class simple_producer:
-    "producer for a string"
+    """producer for a string"""
     def __init__ (self, data, buffer_size=1024):
         self.data = data
         self.buffer_size = buffer_size
@@ -27,11 +27,11 @@ class simple_producer:
             return result
         else:
             result = self.data
-            self.data = ''
+            self.data = b''
             return result
 
 class scanning_producer:
-    "like simple_producer, but more efficient for large strings"
+    """like simple_producer, but more efficient for large strings"""
     def __init__ (self, data, buffer_size=1024):
         self.data = data
         self.buffer_size = buffer_size
@@ -45,13 +45,13 @@ class scanning_producer:
                     self.pos + self.buffer_size
                     )
             result = self.data[lp:rp]
-            self.pos = self.pos + len(result)
+            self.pos += len(result)
             return result
         else:
-            return ''
+            return b''
 
 class lines_producer:
-    "producer for a list of lines"
+    """producer for a list of lines"""
 
     def __init__ (self, lines):
         self.lines = lines
@@ -65,7 +65,7 @@ class lines_producer:
             return ''
 
 class buffer_list_producer:
-    "producer for a list of strings"
+    """producer for a list of strings"""
 
     # i.e., data == ''.join(buffers)
 
@@ -75,14 +75,14 @@ class buffer_list_producer:
 
     def more (self):
         if self.index >= len(self.buffers):
-            return ''
+            return b''
         else:
             data = self.buffers[self.index]
-            self.index = self.index + 1
+            self.index += 1
             return data
 
 class file_producer:
-    "producer wrapper for file[-like] objects"
+    """producer wrapper for file[-like] objects"""
 
     # match http_channel's outgoing buffer size
     out_buffer_size = 1<<16
@@ -93,14 +93,14 @@ class file_producer:
 
     def more (self):
         if self.done:
-            return ''
+            return b''
         else:
             data = self.file.read (self.out_buffer_size)
             if not data:
                 self.file.close()
                 del self.file
                 self.done = 1
-                return ''
+                return b''
             else:
                 return data
 
@@ -112,14 +112,14 @@ class file_producer:
 # of this object.
 
 class output_producer:
-    "Acts like an output file; suitable for capturing sys.stdout"
+    """Acts like an output file; suitable for capturing sys.stdout"""
     def __init__ (self):
-        self.data = ''
+        self.data = b''
 
-    def write(self, data):
+    def write (self, data):
         lines = data.split('\n')
         data = '\r\n'.join(lines)
-        self.data = self.data + data
+        self.data += data
 
     def writeline (self, line):
         self.data = self.data + line + '\r\n'
@@ -142,7 +142,7 @@ class output_producer:
             return ''
 
 class composite_producer:
-    "combine a fifo of producers into one"
+    """combine a fifo of producers into one"""
     def __init__ (self, producers):
         self.producers = producers
 
@@ -155,7 +155,7 @@ class composite_producer:
             else:
                 self.producers.pop(0)
         else:
-            return ''
+            return b''
 
 
 class globbing_producer:
@@ -167,7 +167,7 @@ class globbing_producer:
 
     def __init__ (self, producer, buffer_size=1<<16):
         self.producer = producer
-        self.buffer = ''
+        self.buffer = b''
         self.buffer_size = buffer_size
 
     def more (self):
@@ -178,7 +178,7 @@ class globbing_producer:
             else:
                 break
         r = self.buffer
-        self.buffer = ''
+        self.buffer = b''
         return r
 
 
@@ -201,7 +201,7 @@ class hooked_producer:
                 self.producer = None
                 self.function (self.bytes)
             else:
-                self.bytes = self.bytes + len(result)
+                self.bytes += len(result)
             return result
         else:
             return ''
@@ -232,15 +232,16 @@ class chunked_producer:
         if self.producer:
             data = self.producer.more()
             if data:
-                return '%x\r\n%s\r\n' % (len(data), data)
+                s = '%x' % len(data)
+                return as_bytes(s) + b'\r\n' + data + b'\r\n'
             else:
                 self.producer = None
                 if self.footers:
-                    return '\r\n'.join(['0'] + self.footers) + '\r\n\r\n'
+                    return b'\r\n'.join([b'0'] + self.footers) + b'\r\n\r\n'
                 else:
-                    return '0\r\n\r\n'
+                    return b'0\r\n\r\n'
         else:
-            return ''
+            return b''
 
 try:
     import zlib
@@ -266,7 +267,7 @@ class compressed_producer:
 
     def more (self):
         if self.producer:
-            cdata = ''
+            cdata = b''
             # feed until we get some output
             while not cdata:
                 data = self.producer.more()
@@ -277,18 +278,18 @@ class compressed_producer:
                     cdata = self.compressor.compress (data)
             return cdata
         else:
-            return ''
+            return b''
 
 class escaping_producer:
 
-    "A producer that escapes a sequence of characters"
-    " Common usage: escaping the CRLF.CRLF sequence in SMTP, NNTP, etc..."
+    """A producer that escapes a sequence of characters"""
+    # Common usage: escaping the CRLF.CRLF sequence in SMTP, NNTP, etc...
 
     def __init__ (self, producer, esc_from='\r\n.', esc_to='\r\n..'):
         self.producer = producer
         self.esc_from = esc_from
         self.esc_to = esc_to
-        self.buffer = ''
+        self.buffer = b''
         self.find_prefix_at_end = find_prefix_at_end
 
     def more (self):
@@ -306,7 +307,7 @@ class escaping_producer:
                 return buffer[:-i]
             else:
                 # no prefix, return it all
-                self.buffer = ''
+                self.buffer = b''
                 return buffer
         else:
             return buffer

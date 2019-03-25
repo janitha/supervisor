@@ -48,6 +48,8 @@ you - by calling your self.found_terminator() method.
 
 import socket
 from supervisor.medusa import asyncore_25 as asyncore
+from supervisor.compat import long
+from supervisor.compat import as_bytes
 
 class async_chat (asyncore.dispatcher):
     """This is an abstract class.  You must derive from this class, and add
@@ -58,11 +60,11 @@ class async_chat (asyncore.dispatcher):
     ac_in_buffer_size       = 4096
     ac_out_buffer_size      = 4096
 
-    def __init__ (self, conn=None):
-        self.ac_in_buffer = ''
-        self.ac_out_buffer = ''
+    def __init__ (self, conn=None, map=None):
+        self.ac_in_buffer = b''
+        self.ac_out_buffer = b''
         self.producer_fifo = fifo()
-        asyncore.dispatcher.__init__ (self, conn)
+        asyncore.dispatcher.__init__ (self, conn, map)
 
     def collect_incoming_data(self, data):
         raise NotImplementedError("must be implemented in subclass")
@@ -71,7 +73,7 @@ class async_chat (asyncore.dispatcher):
         raise NotImplementedError("must be implemented in subclass")
 
     def set_terminator (self, term):
-        "Set the input delimiter.  Can be a fixed string of any length, an integer, or None"
+        """Set the input delimiter.  Can be a fixed string of any length, an integer, or None"""
         self.terminator = term
 
     def get_terminator (self):
@@ -83,14 +85,13 @@ class async_chat (asyncore.dispatcher):
     # if found, transition to the next state.
 
     def handle_read (self):
-
         try:
             data = self.recv (self.ac_in_buffer_size)
         except socket.error:
             self.handle_error()
             return
 
-        self.ac_in_buffer = self.ac_in_buffer + data
+        self.ac_in_buffer += data
 
         # Continue to search for self.terminator in self.ac_in_buffer,
         # while calling self.collect_incoming_data.  The while loop
@@ -103,14 +104,14 @@ class async_chat (asyncore.dispatcher):
             if not terminator:
                 # no terminator, collect it all
                 self.collect_incoming_data (self.ac_in_buffer)
-                self.ac_in_buffer = ''
+                self.ac_in_buffer = b''
             elif isinstance(terminator, int) or isinstance(terminator, long):
                 # numeric terminator
                 n = terminator
                 if lb < n:
                     self.collect_incoming_data (self.ac_in_buffer)
-                    self.ac_in_buffer = ''
-                    self.terminator = self.terminator - lb
+                    self.ac_in_buffer = b''
+                    self.terminator -= lb
                 else:
                     self.collect_incoming_data (self.ac_in_buffer[:n])
                     self.ac_in_buffer = self.ac_in_buffer[n:]
@@ -146,7 +147,7 @@ class async_chat (asyncore.dispatcher):
                     else:
                         # no prefix, collect it all
                         self.collect_incoming_data (self.ac_in_buffer)
-                        self.ac_in_buffer = ''
+                        self.ac_in_buffer = b''
 
     def handle_write (self):
         self.initiate_send ()
@@ -155,7 +156,8 @@ class async_chat (asyncore.dispatcher):
         self.close()
 
     def push (self, data):
-        self.producer_fifo.push (simple_producer (data))
+        data = as_bytes(data)
+        self.producer_fifo.push(simple_producer(data))
         self.initiate_send()
 
     def push_with_producer (self, producer):
@@ -163,21 +165,21 @@ class async_chat (asyncore.dispatcher):
         self.initiate_send()
 
     def readable (self):
-        "predicate for inclusion in the readable for select()"
-        return (len(self.ac_in_buffer) <= self.ac_in_buffer_size)
+        """predicate for inclusion in the readable for select()"""
+        return len(self.ac_in_buffer) <= self.ac_in_buffer_size
 
     def writable (self):
-        "predicate for inclusion in the writable for select()"
+        """predicate for inclusion in the writable for select()"""
         # return len(self.ac_out_buffer) or len(self.producer_fifo) or (not self.connected)
         # this is about twice as fast, though not as clear.
         return not (
-                (self.ac_out_buffer == '') and
+                (self.ac_out_buffer == b'') and
                 self.producer_fifo.is_empty() and
                 self.connected
                 )
 
     def close_when_done (self):
-        "automatically close this channel once the outgoing queue is empty"
+        """automatically close this channel once the outgoing queue is empty"""
         self.producer_fifo.push (None)
 
     # refill the outgoing buffer by calling the more() method
@@ -193,9 +195,9 @@ class async_chat (asyncore.dispatcher):
                         self.producer_fifo.pop()
                         self.close()
                     return
-                elif isinstance(p, str):
+                elif isinstance(p, bytes):
                     self.producer_fifo.pop()
-                    self.ac_out_buffer = self.ac_out_buffer + p
+                    self.ac_out_buffer += p
                     return
                 data = p.more()
                 if data:
@@ -209,7 +211,7 @@ class async_chat (asyncore.dispatcher):
     def initiate_send (self):
         obs = self.ac_out_buffer_size
         # try to refill the buffer
-        if (len (self.ac_out_buffer) < obs):
+        if len (self.ac_out_buffer) < obs:
             self.refill_buffer()
 
         if self.ac_out_buffer and self.connected:
@@ -225,8 +227,8 @@ class async_chat (asyncore.dispatcher):
 
     def discard_buffers (self):
         # Emergencies only!
-        self.ac_in_buffer = ''
-        self.ac_out_buffer = ''
+        self.ac_in_buffer = b''
+        self.ac_out_buffer = b''
         while self.producer_fifo:
             self.producer_fifo.pop()
 
@@ -244,7 +246,7 @@ class simple_producer:
             return result
         else:
             result = self.data
-            self.data = ''
+            self.data = b''
             return result
 
 class fifo:
@@ -268,9 +270,9 @@ class fifo:
 
     def pop (self):
         if self.list:
-            return (1, self.list.pop(0))
+            return 1, self.list.pop(0)
         else:
-            return (0, None)
+            return 0, None
 
 # Given 'haystack', see if any prefix of 'needle' is at its end.  This
 # assumes an exact match has already been checked.  Return the number of

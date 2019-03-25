@@ -3,6 +3,11 @@ PATCHES MADE ONLY TO THIS MEDUSA PACKAGE BUNDLED WITH SUPERVISOR
   and updated Medusa throughout to use these.  The Python 2.6 stdlib version
   of these modules introduced backward-incompatible changes.
 * Changed imports throughout from "medusa" to "supervisor.medusa".
+* Removed medusa files not used by Supervisor.
+* Fixed a bug in auth_handler.py where colons could not be used in passwords
+  for HTTP Basic authentication (Supervisor issue #309).
+* Time out connections based on inactivity instead of age (Supervisor issue
+  #651).
 
 Version 0.5.5:
 

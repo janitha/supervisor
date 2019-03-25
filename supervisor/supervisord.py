@@ -5,8 +5,8 @@
 Usage: %s [options]
 
 Options:
--c/--configuration FILENAME -- configuration file
--n/--nodaemon -- run in the foreground (same as 'nodaemon true' in config file)
+-c/--configuration FILENAME -- configuration file path (searches if not given)
+-n/--nodaemon -- run in the foreground (same as 'nodaemon=true' in config file)
 -h/--help -- print this usage message and exit
 -v/--version -- print supervisord version number and exit
 -u/--user USER -- run supervisord as this user (or numeric uid)
@@ -32,12 +32,11 @@ Options:
 
 import os
 import time
-import errno
-import select
 import signal
 
 from supervisor.medusa import asyncore_25 as asyncore
 
+from supervisor.compat import as_string
 from supervisor.options import ServerOptions
 from supervisor.options import signame
 from supervisor import events
@@ -60,21 +59,15 @@ class Supervisor:
             # prevent crash on libdispatch-based systems, at least for the
             # first request
             self.options.cleanup_fds()
-        info_messages = []
-        critical_messages = []
-        warn_messages = []
-        setuid_msg = self.options.set_uid()
-        if setuid_msg:
-            critical_messages.append(setuid_msg)
+
+        self.options.set_uid_or_exit()
+
         if self.options.first:
-            rlimit_messages = self.options.set_rlimits()
-            info_messages.extend(rlimit_messages)
-        warn_messages.extend(self.options.parse_warnings)
+            self.options.set_rlimits_or_exit()
 
         # this sets the options.logger object
         # delay logger instantiation until after setuid
-        self.options.make_logger(critical_messages, warn_messages,
-                                 info_messages)
+        self.options.make_logger()
 
         if not self.options.nocleanup:
             # clean up old automatic logs
@@ -122,34 +115,35 @@ class Supervisor:
         if name not in self.process_groups:
             config.after_setuid()
             self.process_groups[name] = config.make_group()
+            events.notify(events.ProcessGroupAddedEvent(name))
             return True
         return False
 
     def remove_process_group(self, name):
         if self.process_groups[name].get_unstopped_processes():
             return False
+        self.process_groups[name].before_remove()
         del self.process_groups[name]
+        events.notify(events.ProcessGroupRemovedEvent(name))
         return True
 
     def get_process_map(self):
         process_map = {}
-        pgroups = self.process_groups.values()
-        for group in pgroups:
+        for group in self.process_groups.values():
             process_map.update(group.get_dispatchers())
         return process_map
 
     def shutdown_report(self):
         unstopped = []
 
-        pgroups = self.process_groups.values()
-        for group in pgroups:
+        for group in self.process_groups.values():
             unstopped.extend(group.get_unstopped_processes())
 
         if unstopped:
             # throttle 'waiting for x to die' reports
             now = time.time()
             if now > (self.lastshutdownreport + 3): # every 3 secs
-                names = [ p.config.name for p in unstopped ]
+                names = [ as_string(p.config.name) for p in unstopped ]
                 namestr = ', '.join(names)
                 self.options.logger.info('waiting for %s to die' % namestr)
                 self.lastshutdownreport = now
@@ -188,7 +182,7 @@ class Supervisor:
             combined_map.update(socket_map)
             combined_map.update(self.get_process_map())
 
-            pgroups = self.process_groups.values()
+            pgroups = list(self.process_groups.values())
             pgroups.sort()
 
             if self.options.mood < SupervisorStates.RUNNING:
@@ -203,53 +197,49 @@ class Supervisor:
 
                 if not self.shutdown_report():
                     # if there are no unstopped processes (we're done
-                    # killing everything), it's OK to swtop or reload
+                    # killing everything), it's OK to shutdown or reload
                     raise asyncore.ExitNow
-
-            r, w, x = [], [], []
 
             for fd, dispatcher in combined_map.items():
                 if dispatcher.readable():
-                    r.append(fd)
+                    self.options.poller.register_readable(fd)
                 if dispatcher.writable():
-                    w.append(fd)
+                    self.options.poller.register_writable(fd)
 
-            try:
-                r, w, x = self.options.select(r, w, x, timeout)
-            except select.error, err:
-                r = w = x = []
-                if err.args[0] == errno.EINTR:
-                    self.options.logger.blather('EINTR encountered in select')
-                else:
-                    raise
+            r, w = self.options.poller.poll(timeout)
 
             for fd in r:
-                if combined_map.has_key(fd):
+                if fd in combined_map:
                     try:
                         dispatcher = combined_map[fd]
                         self.options.logger.blather(
-                            'read event caused by %(dispatcher)s',
+                            'read event caused by %(dispatcher)r',
                             dispatcher=dispatcher)
                         dispatcher.handle_read_event()
+                        if not dispatcher.readable():
+                            self.options.poller.unregister_readable(fd)
                     except asyncore.ExitNow:
                         raise
                     except:
                         combined_map[fd].handle_error()
 
             for fd in w:
-                if combined_map.has_key(fd):
+                if fd in combined_map:
                     try:
                         dispatcher = combined_map[fd]
                         self.options.logger.blather(
-                            'write event caused by %(dispatcher)s',
+                            'write event caused by %(dispatcher)r',
                             dispatcher=dispatcher)
                         dispatcher.handle_write_event()
+                        if not dispatcher.writable():
+                            self.options.poller.unregister_writable(fd)
                     except asyncore.ExitNow:
                         raise
                     except:
                         combined_map[fd].handle_error()
 
-            [ group.transition() for group  in pgroups ]
+            for group in pgroups:
+                group.transition()
 
             self.reap()
             self.handle_signal()
@@ -278,17 +268,21 @@ class Supervisor:
                 self.ticks[period] = this_tick
                 events.notify(event(this_tick, self))
 
-    def reap(self, once=False):
+    def reap(self, once=False, recursionguard=0):
+        if recursionguard == 100:
+            return
         pid, sts = self.options.waitpid()
         if pid:
             process = self.options.pidhistory.get(pid, None)
             if process is None:
-                self.options.logger.critical('reaped unknown pid %s)' % pid)
+                self.options.logger.info('reaped unknown pid %s' % pid)
             else:
                 process.finish(pid, sts)
                 del self.options.pidhistory[pid]
             if not once:
-                self.reap() # keep reaping until no more kids to reap
+                # keep reaping until no more kids to reap, but don't recurse
+                # infintely
+                self.reap(once=False, recursionguard=recursionguard+1)
 
     def handle_signal(self):
         sig = self.options.get_signal()
@@ -298,9 +292,13 @@ class Supervisor:
                     'received %s indicating exit request' % signame(sig))
                 self.options.mood = SupervisorStates.SHUTDOWN
             elif sig == signal.SIGHUP:
-                self.options.logger.warn(
-                    'received %s indicating restart request' % signame(sig))
-                self.options.mood = SupervisorStates.RESTARTING
+                if self.options.mood == SupervisorStates.SHUTDOWN:
+                    self.options.logger.warn(
+                        'ignored %s indicating restart request (shutdown in progress)' % signame(sig))
+                else:
+                    self.options.logger.warn(
+                        'received %s indicating restart request' % signame(sig))
+                    self.options.mood = SupervisorStates.RESTARTING
             elif sig == signal.SIGCHLD:
                 self.options.logger.debug(
                     'received %s indicating a child quit' % signame(sig))
@@ -321,11 +319,11 @@ def timeslice(period, when):
     return int(when - (when % period))
 
 # profile entry point
-def profile(cmd, globals, locals, sort_order, callers):
+def profile(cmd, globals, locals, sort_order, callers): # pragma: no cover
     try:
         import cProfile as profile
     except ImportError:
-        import profile # python < 2.5
+        import profile
     import pstats
     import tempfile
     fd, fn = tempfile.mkstemp()
@@ -358,18 +356,18 @@ def main(args=None, test=False):
             profile('go(options)', globals(), locals(), sort_order, callers)
         else:
             go(options)
-        if test or (options.mood < SupervisorStates.RESTARTING):
-            break
         options.close_httpservers()
         options.close_logger()
         first = False
+        if test or (options.mood < SupervisorStates.RESTARTING):
+            break
 
-def go(options):
+def go(options): # pragma: no cover
     d = Supervisor(options)
     try:
         d.main()
     except asyncore.ExitNow:
         pass
 
-if __name__ == "__main__":
+if __name__ == "__main__": # pragma: no cover
     main()

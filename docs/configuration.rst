@@ -16,18 +16,47 @@ file it finds.
 
 #. :file:`/etc/supervisord.conf`
 
-:file:`supervisord.conf` is a Windows-INI-style (Python ConfigParser)
-file.  It has sections (each denoted by a ``[header]``)and key / value
-pairs within the sections.  The sections and their allowable values
-are described below.
+#. :file:`/etc/supervisor/supervisord.conf` (since Supervisor 3.3.0)
+
+#. :file:`../etc/supervisord.conf` (Relative to the executable)
+
+#. :file:`../supervisord.conf` (Relative to the executable)
 
 .. note::
 
-  Some distributions have packaged Supervisor with their own
-  customizations.  These modified versions of Supervisor may load the
-  configuration file from locations other than those described here.
-  Notably, Ubuntu packages have been found that use
-  ``/etc/supervisor/supervisord.conf``.
+  Many versions of Supervisor packaged for Debian and Ubuntu included a patch
+  that added ``/etc/supervisor/supervisord.conf`` to the search paths.  The
+  first PyPI package of Supervisor to include it was Supervisor 3.3.0.
+
+File Format
+-----------
+
+:file:`supervisord.conf` is a Windows-INI-style (Python ConfigParser)
+file.  It has sections (each denoted by a ``[header]``) and key / value
+pairs within the sections.  The sections and their allowable values
+are described below.
+
+Environment Variables
+~~~~~~~~~~~~~~~~~~~~~
+
+Environment variables that are present in the environment at the time that
+:program:`supervisord` is started can be used in the configuration file
+using the Python string expression syntax ``%(ENV_X)s``:
+
+.. code-block:: ini
+
+    [program:example]
+    command=/usr/bin/example --loglevel=%(ENV_LOGLEVEL)s
+
+In the example above, the expression ``%(ENV_LOGLEVEL)s`` would be expanded
+to the value of the environment variable ``LOGLEVEL``.
+
+.. note::
+
+    In Supervisor 3.2 and later, ``%(ENV_X)s`` expressions are supported in
+    all options.  In prior versions, some options support them, but most
+    do not.  See the documentation for each option below.
+
 
 ``[unix_http_server]`` Section Settings
 ---------------------------------------
@@ -286,7 +315,8 @@ follows.
   is run as root.  supervisord uses file descriptors liberally, and will
   enter a failure mode when one cannot be obtained from the OS, so it's
   useful to be able to specify a minimum value to ensure it doesn't run out
-  of them during execution. This option is particularly useful on Solaris,
+  of them during execution.  These limits will be inherited by the managed
+  subprocesses.  This option is particularly useful on Solaris,
   which has a low per-process fd limit by default.
 
   *Default*:  1024
@@ -314,7 +344,7 @@ follows.
 ``nocleanup``
 
   Prevent supervisord from clearing any existing ``AUTO``
-  chlild log files at startup time.  Useful for debugging.
+  child log files at startup time.  Useful for debugging.
 
   *Default*:  false
 
@@ -336,9 +366,12 @@ follows.
 
 ``user``
 
-  If :program:`supervisord` is run as the root user, switch users to
-  this UNIX user account before doing any meaningful processing.  This
-  value has no effect if :program:`supervisord` is not run as root.
+  Instruct :program:`supervisord` to switch users to this UNIX user
+  account before doing any meaningful processing.  The user can only
+  be switched if :program:`supervisord` is started as the root user.
+  If :program:`supervisord` can't switch users, it will still continue
+  but will write a log message at the ``critical`` level saying that it
+  can't drop privileges.
 
   *Default*: do not switch users
 
@@ -378,10 +411,12 @@ follows.
   directory in which the supervisord configuration file was found.
   Values containing non-alphanumeric characters should be quoted
   (e.g. ``KEY="val:123",KEY2="val,456"``).  Otherwise, quoting the
-  values is optional but recommended.  **Note** that subprocesses will
-  inherit the environment variables of the shell used to start
-  :program:`supervisord` except for the ones overridden here and within
-  the program's ``environment`` option. See :ref:`subprocess_environment`.
+  values is optional but recommended.  To escape percent characters,
+  simply use two. (e.g. ``URI="/first%%20name"``) **Note** that
+  subprocesses will inherit the environment variables of the shell
+  used to start :program:`supervisord` except for the ones overridden
+  here and within the program's ``environment`` option.  See
+  :ref:`subprocess_environment`.
 
   *Default*: no values
 
@@ -494,7 +529,7 @@ follows.
 
   *Required*:  No.
 
-  *Introduced*: post-3.0a4 (not including 3.0a4)
+  *Introduced*: 3.0a5
 
 ``[supervisorctl]`` Section Example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -536,7 +571,7 @@ where specified.
    will have a single process named ``x`` in it.  This provides a
    modicum of backwards compatibility with older supervisor releases,
    which did not treat program sections as homogeneous process group
-   defnitions.
+   definitions.
 
    But for instance, if you have a ``[program:foo]`` section with a
    ``numprocs`` of 3 and a ``process_name`` expression of
@@ -571,6 +606,14 @@ where specified.
   programs should themselves not be daemons, as supervisord assumes it is
   responsible for daemonizing its subprocesses (see
   :ref:`nondaemonizing_of_subprocesses`).
+
+  .. note::
+
+    The command will be truncated if it looks like a config file comment,
+    e.g. ``command=bash -c 'foo ; bar'`` will be truncated to
+    ``command=bash -c 'foo``.  Quoting will not prevent this behavior,
+    since the configuration file reader does not parse the command like
+    a shell would.
 
   *Default*: No default.
 
@@ -643,30 +686,19 @@ where specified.
 
   *Introduced*: 3.0
 
-``autorestart``
-
-  May be one of ``false``, ``unexpected``, or ``true``.  If ``false``,
-  the process will never be autorestarted.  If ``unexpected``, the
-  process will be restart when the program exits with an exit code
-  that is not one of the exit codes associated with this process'
-  configuration (see ``exitcodes``).  If ``true``, the process will be
-  unconditionally restarted when it exits, without regard to its exit
-  code.
-
-  *Default*: unexpected
-
-  *Required*:  No.
-
-  *Introduced*: 3.0
-
 ``startsecs``
 
   The total number of seconds which the program needs to stay running
-  after a startup to consider the start successful.  If the program
-  does not stay up for this many seconds after it has started, even if
-  it exits with an "expected" exit code (see ``exitcodes``), the
-  startup will be considered a failure.  Set to ``0`` to indicate that
-  the program needn't stay running for any particular amount of time.
+  after a startup to consider the start successful (moving the process
+  from the ``STARTING`` state to the ``RUNNING`` state).  Set to ``0``
+  to indicate that the program needn't stay running for any particular
+  amount of time.
+
+  .. note::
+
+      Even if a process exits with an "expected" exit code (see
+      ``exitcodes``), the start will still be considered a failure
+      if the process exits quicker than ``startsecs``.
 
   *Default*: 1
 
@@ -678,7 +710,7 @@ where specified.
 
   The number of serial failure attempts that :program:`supervisord`
   will allow when attempting to start the program before giving up and
-  puting the process into an ``FATAL`` state.  See
+  putting the process into an ``FATAL`` state.  See
   :ref:`process_states` for explanation of the ``FATAL`` state.
 
   *Default*: 3
@@ -687,19 +719,52 @@ where specified.
 
   *Introduced*: 3.0
 
-``exitcodes``
+``autorestart``
 
-  The list of "expected" exit codes for this program.  If the
-  ``autorestart`` parameter is set to ``unexpected``, and the process
-  exits in any other way than as a result of a supervisor stop
-  request, :program:`supervisord` will restart the process if it exits
-  with an exit code that is not defined in this list.
+  Specifies if :program:`supervisord` should automatically restart a
+  process if it exits when it is in the ``RUNNING`` state.  May be
+  one of ``false``, ``unexpected``, or ``true``.  If ``false``, the
+  process will not be autorestarted.  If ``unexpected``, the process
+  will be restarted when the program exits with an exit code that is
+  not one of the exit codes associated with this process' configuration
+  (see ``exitcodes``).  If ``true``, the process will be unconditionally
+  restarted when it exits, without regard to its exit code.
 
-  *Default*: 0,2
+  .. note::
+
+      ``autorestart`` controls whether :program:`supervisord` will
+      autorestart a program if it exits after it has successfully started
+      up (the process is in the ``RUNNING`` state).
+
+      :program:`supervisord` has a different restart mechanism for when the
+      process is starting up (the process is in the ``STARTING`` state).
+      Retries during process startup are controlled by ``startsecs``
+      and ``startretries``.
+
+  *Default*: unexpected
 
   *Required*:  No.
 
   *Introduced*: 3.0
+
+``exitcodes``
+
+  The list of "expected" exit codes for this program used with ``autorestart``.
+  If the ``autorestart`` parameter is set to ``unexpected``, and the process
+  exits in any other way than as a result of a supervisor stop
+  request, :program:`supervisord` will restart the process if it exits
+  with an exit code that is not defined in this list.
+
+  *Default*: 0
+
+  *Required*:  No.
+
+  *Introduced*: 3.0
+
+  .. note::
+
+      In Supervisor versions prior to 4.0, the default was ``0,2``.  In
+      Supervisor 4.0, the default was changed to ``0``.
 
 ``stopsignal``
 
@@ -714,10 +779,10 @@ where specified.
 
 ``stopwaitsecs``
 
-  The number of seconds to wait for the OS to return a SIGCHILD to
+  The number of seconds to wait for the OS to return a SIGCHLD to
   :program:`supervisord` after the program has been sent a stopsignal.
   If this number of seconds elapses before :program:`supervisord`
-  receives a SIGCHILD from the process, :program:`supervisord` will
+  receives a SIGCHLD from the process, :program:`supervisord` will
   attempt to kill it with a final SIGKILL.
 
   *Default*: 10
@@ -754,9 +819,16 @@ where specified.
 
 ``user``
 
-  If :program:`supervisord` runs as root, this UNIX user account will
-  be used as the account which runs the program.  If :program:`supervisord`
+  Instruct :program:`supervisord` to use this UNIX user account as the
+  account which runs the program.  The user can only be switched if
+  :program:`supervisord` is run as the root user.  If :program:`supervisord`
   can't switch to the specified user, the program will not be started.
+
+  .. note::
+
+      The user will be changed using ``setuid`` only.  This does not start
+      a login shell and does not change environment variables like
+      ``USER`` or ``HOME``.  See :ref:`subprocess_environment` for details.
 
   *Default*: Do not switch users
 
@@ -769,6 +841,13 @@ where specified.
   If true, cause the process' stderr output to be sent back to
   :program:`supervisord` on its stdout file descriptor (in UNIX shell
   terms, this is the equivalent of executing ``/the/program 2>&1``).
+
+  .. note::
+
+     Do not set ``redirect_stderr=true`` in an ``[eventlistener:x]`` section.
+     Eventlisteners use ``stdout`` and ``stdin`` to communicate with
+     ``supervisord``.  If ``stderr`` is redirected, output from
+     ``stderr`` will interfere with the eventlistener protocol.
 
   *Default*: false
 
@@ -837,7 +916,7 @@ where specified.
 
   *Required*:  No.
 
-  *Introduced*: 3.0, replaces 2.0's ``logfile_backups``
+  *Introduced*: 3.0
 
 ``stdout_events_enabled``
 
@@ -860,7 +939,7 @@ where specified.
 
   *Required*:  No.
 
-  *Introduced*: 3.1a1
+  *Introduced*: 4.0.0
 
 ``stderr_logfile``
 
@@ -937,7 +1016,7 @@ where specified.
 
   *Required*:  No.
 
-  *Introduced*: 3.1a1
+  *Introduced*: 4.0.0
 
 ``environment``
 
@@ -1011,22 +1090,26 @@ where specified.
    umask=022
    priority=999
    autostart=true
-   autorestart=true
+   autorestart=unexpected
    startsecs=10
    startretries=3
-   exitcodes=0,2
+   exitcodes=0
    stopsignal=TERM
    stopwaitsecs=10
+   stopasgroup=false
+   killasgroup=false
    user=chrism
    redirect_stderr=false
    stdout_logfile=/a/path
    stdout_logfile_maxbytes=1MB
    stdout_logfile_backups=10
    stdout_capture_maxbytes=1MB
+   stdout_events_enabled=false
    stderr_logfile=/a/path
    stderr_logfile_maxbytes=1MB
    stderr_logfile_backups=10
    stderr_capture_maxbytes=1MB
+   stderr_events_enabled=false
    environment=A="1",B="2"
    serverurl=AUTO
 
@@ -1039,6 +1122,12 @@ section, it must contain a single key named "files".  The values in
 this key specify other configuration files to be included within the
 configuration.
 
+.. note::
+
+    The ``[include]`` section is processed only by ``supervisord``.  It is
+    ignored by ``supervisorctl``.
+
+
 ``[include]`` Section Values
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -1050,14 +1139,18 @@ configuration.
   includes it.  A "glob" is a file pattern which matches a specified
   pattern according to the rules used by the Unix shell. No tilde
   expansion is done, but ``*``, ``?``, and character ranges expressed
-  with ``[]`` will be correctly matched.  Recursive includes from
-  included files are not supported.
+  with ``[]`` will be correctly matched.  The string expression is
+  evaluated against a dictionary that includes ``host_node_name``
+  and ``here`` (the directory of the supervisord config file).  Recursive
+  includes from included files are not supported.
 
   *Default*: No default (required)
 
   *Required*:  Yes.
 
   *Introduced*: 3.0
+
+  *Changed*: 3.3.0.  Added support for the ``host_node_name`` expansion.
 
 ``[include]`` Section Example
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1070,7 +1163,7 @@ configuration.
 ``[group:x]`` Section Settings
 ------------------------------
 
-It is often useful to group "homogeneous" processes groups (aka
+It is often useful to group "homogeneous" process groups (aka
 "programs") together into a "heterogeneous" process group so they can
 be controlled as a unit from Supervisor's various controller
 interfaces.
@@ -1089,7 +1182,7 @@ For a ``[group:x]``, there must be one or more ``[program:x]``
 sections elsewhere in your configuration file, and the group must
 refer to them by name in the ``programs`` value.
 
-If "homogeneous" program groups" (represented by program sections) are
+If "homogeneous" process groups (represented by program sections) are
 placed into a "heterogeneous" group via ``[group:x]`` section's
 ``programs`` line, the homogeneous groups that are implied by the
 program section will not exist at runtime in supervisor.  Instead, all
@@ -1193,7 +1286,7 @@ also respected by ``fcgi-program`` sections.
 ``[fcgi-program:x]`` Section Values
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``[fcgi-program:x]`` sections have a single key which ``[program:x]``
+``[fcgi-program:x]`` sections have a few keys which ``[program:x]``
 sections do not have.
 
 ``socket``
@@ -1245,25 +1338,34 @@ above constraints and additions.
    [fcgi-program:fcgiprogramname]
    command=/usr/bin/example.fcgi
    socket=unix:///var/run/supervisor/%(program_name)s.sock
+   socket_owner=chrism
+   socket_mode=0700
    process_name=%(program_name)s_%(process_num)02d
    numprocs=5
+   directory=/tmp
+   umask=022
    priority=999
    autostart=true
    autorestart=unexpected
    startsecs=1
    startretries=3
-   exitcodes=0,2
+   exitcodes=0
    stopsignal=QUIT
+   stopasgroup=false
+   killasgroup=false
    stopwaitsecs=10
    user=chrism
    redirect_stderr=true
    stdout_logfile=/a/path
    stdout_logfile_maxbytes=1MB
    stdout_logfile_backups=10
+   stdout_events_enabled=false
    stderr_logfile=/a/path
    stderr_logfile_maxbytes=1MB
-   stderr_logfile_backups
+   stderr_logfile_backups=10
+   stderr_events_enabled=false
    environment=A="1",B="2"
+   serverurl=AUTO
 
 ``[eventlistener:x]`` Section Settings
 --------------------------------------
@@ -1276,10 +1378,9 @@ an explanation of how events work and how to implement programs that
 can be declared as event listeners.
 
 Note that all the options available to ``[program:x]`` sections are
-respected by eventlistener sections *except* for
-``stdout_capture_maxbytes`` and ``stderr_capture_maxbytes`` (event
-listeners cannot emit process communication events, see
-:ref:`capture_mode`).
+respected by eventlistener sections *except* for ``stdout_capture_maxbytes``.
+Eventlisteners cannot emit process communication events on ``stdout``,
+but can emit on ``stderr`` (see :ref:`capture_mode`).
 
 ``[eventlistener:x]`` Section Values
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1323,23 +1424,30 @@ above constraints and additions.
    numprocs=5
    events=PROCESS_STATE
    buffer_size=10
+   directory=/tmp
+   umask=022
    priority=-1
    autostart=true
    autorestart=unexpected
    startsecs=1
    startretries=3
-   exitcodes=0,2
+   exitcodes=0
    stopsignal=QUIT
    stopwaitsecs=10
+   stopasgroup=false
+   killasgroup=false
    user=chrism
-   redirect_stderr=true
+   redirect_stderr=false
    stdout_logfile=/a/path
    stdout_logfile_maxbytes=1MB
    stdout_logfile_backups=10
+   stdout_events_enabled=false
    stderr_logfile=/a/path
    stderr_logfile_maxbytes=1MB
-   stderr_logfile_backups
+   stderr_logfile_backups=10
+   stderr_events_enabled=false
    environment=A="1",B="2"
+   serverurl=AUTO
 
 ``[rpcinterface:x]`` Section Settings
 -------------------------------------

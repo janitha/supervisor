@@ -1,21 +1,18 @@
 # -*- Mode: Python -*-
 
-import asynchat_25 as asynchat
+import supervisor.medusa.asynchat_25 as asynchat
 import socket
 import time         # these three are for the rotating logger
 import os           # |
 import stat         # v
 
 #
-# three types of log:
+# two types of log:
 # 1) file
 #    with optional flushing.  Also, one that rotates the log.
 # 2) socket
 #    dump output directly to a socket connection. [how do we
 #    keep it open?]
-# 3) syslog
-#    log to syslog via tcp.  this is a per-line protocol.
-#
 
 #
 # The 'standard' interface to a logging object is simply
@@ -34,8 +31,8 @@ class file_logger:
 
     # pass this either a path or a file object.
     def __init__ (self, file, flush=1, mode='a'):
-        if type(file) == type(''):
-            if (file == '-'):
+        if isinstance(file, str):
+            if file == '-':
                 import sys
                 self.file = sys.stdout
             else:
@@ -87,13 +84,12 @@ class rotating_file_logger (file_logger):
     # Else if maxsize is non-None we back up whenever the log gets
     # to big.  If both are None we never back up.
     def __init__ (self, file, freq=None, maxsize=None, flush=1, mode='a'):
+        file_logger.__init__ (self, file, flush, mode)
         self.filename = file
         self.mode = mode
-        self.file = open (file, mode)
         self.freq = freq
         self.maxsize = maxsize
         self.rotate_when = self.next_backup(self.freq)
-        self.do_flush = flush
 
     def __repr__ (self):
         return '<rotating-file logger: %s>' % self.file
@@ -133,50 +129,21 @@ class rotating_file_logger (file_logger):
             newname = '%s.ends%04d%02d%02d' % (self.filename, yr, mo, day)
             try:
                 open(newname, "r").close()      # check if file exists
-                newname = newname + "-%02d%02d%02d" % (hr, min, sec)
-            except:                             # YEARMODY is unique
+                newname += "-%02d%02d%02d" % (hr, min, sec)
+            except:                             # YEAR_MONTH_DAY is unique
                 pass
             os.rename(self.filename, newname)
             self.file = open(self.filename, self.mode)
         except:
             pass
 
-# syslog is a line-oriented log protocol - this class would be
-# appropriate for FTP or HTTP logs, but not for dumping stderr to.
-
-# TODO: a simple safety wrapper that will ensure that the line sent
-# to syslog is reasonable.
-
-# TODO: async version of syslog_client: now, log entries use blocking
-# send()
-
-import m_syslog
-syslog_logger = m_syslog.syslog_client
-
-class syslog_logger (m_syslog.syslog_client):
-    def __init__ (self, address, facility='user'):
-        m_syslog.syslog_client.__init__ (self, address)
-        self.facility = m_syslog.facility_names[facility]
-        self.address=address
-
-    def __repr__ (self):
-        return '<syslog logger address=%s>' % (repr(self.address))
-
-    def log (self, message):
-        m_syslog.syslog_client.log (
-                self,
-                message,
-                facility=self.facility,
-                priority=m_syslog.LOG_INFO
-                )
-
 # log to a stream socket, asynchronously
 
 class socket_logger (asynchat.async_chat):
 
     def __init__ (self, address):
-
-        if type(address) == type(''):
+        asynchat.async_chat.__init__(self)
+        if isinstance(address, str):
             self.create_socket (socket.AF_UNIX, socket.SOCK_STREAM)
         else:
             self.create_socket (socket.AF_INET, socket.SOCK_STREAM)
@@ -185,7 +152,7 @@ class socket_logger (asynchat.async_chat):
         self.address = address
 
     def __repr__ (self):
-        return '<socket logger: address=%s>' % (self.address)
+        return '<socket logger: address=%s>' % self.address
 
     def log (self, message):
         if message[-2:] != '\r\n':
@@ -234,7 +201,7 @@ class resolving_logger:
                 )
 
 class unresolving_logger:
-    "Just in case you don't want to resolve"
+    """Just in case you don't want to resolve"""
     def __init__ (self, logger):
         self.logger = logger
 
@@ -248,7 +215,7 @@ def strip_eol (line):
     return line
 
 class tail_logger:
-    "Keep track of the last <size> log messages"
+    """Keep track of the last <size> log messages"""
     def __init__ (self, logger, size=500):
         self.size = size
         self.logger = logger

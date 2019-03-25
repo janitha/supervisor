@@ -117,7 +117,7 @@ Supervisor Components
 
   The server process uses a configuration file.  This is typically
   located in :file:`/etc/supervisord.conf`.  This configuration file
-  is an "Windows-INI" style config file.  It is important to keep this
+  is a "Windows-INI" style config file.  It is important to keep this
   file secure via proper filesystem permissions because it may contain
   unencrypted usernames and passwords.
 
@@ -127,8 +127,8 @@ Supervisor Components
   :program:`supervisorctl`.  It provides a shell-like interface to the
   features provided by :program:`supervisord`.  From
   :program:`supervisorctl`, a user can connect to different
-  :program:`supervisord` processes, get status on the subprocesses
-  controlled by, stop and start subprocesses of, and get lists of
+  :program:`supervisord` processes (one at a time), get status on the
+  subprocesses controlled by, stop and start subprocesses of, and get lists of
   running processes of a :program:`supervisord`.
 
   The command-line client talks to the server across a UNIX domain
@@ -162,5 +162,5 @@ It will likely work fine on most UNIX systems.
 
 Supervisor will *not* run at all under any version of Windows.
 
-Supervisor is known to work with Python 2.4 or later but will not work
-under any version of Python 3.
+Supervisor is intended to work on Python 3 version 3.4 or later
+and on Python 2 version 2.7.

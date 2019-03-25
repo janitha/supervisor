@@ -7,10 +7,14 @@
 
 VERSION = "$Id: xmlrpc_handler.py,v 1.6 2004/04/21 14:09:24 akuchling Exp $"
 
-import http_server
-import xmlrpclib
+from supervisor.compat import as_string
 
-import string
+import supervisor.medusa.http_server as http_server
+try:
+    import xmlrpclib
+except:
+    import xmlrpc.client as xmlrpclib
+
 import sys
 
 class xmlrpc_handler:
@@ -23,8 +27,6 @@ class xmlrpc_handler:
             return 0
 
     def handle_request (self, request):
-        [path, params, query, fragment] = request.split_uri()
-
         if request.command == 'POST':
             request.collector = collector (self, request)
         else:
@@ -41,7 +43,7 @@ class xmlrpc_handler:
             except:
                 # report exception back to server
                 response = xmlrpclib.dumps (
-                        xmlrpclib.Fault (1, "%s:%s" % (sys.exc_type, sys.exc_value))
+                        xmlrpclib.Fault (1, "%s:%s" % (sys.exc_info()[0], sys.exc_info()[1]))
                         )
             else:
                 response = xmlrpclib.dumps (response, methodresponse=1)
@@ -56,11 +58,11 @@ class xmlrpc_handler:
 
     def call (self, method, params):
         # override this method to implement RPC methods
-        raise "NotYetImplemented"
+        raise Exception("NotYetImplemented")
 
 class collector:
 
-    "gathers input for POST and PUT requests"
+    """gathers input for POST and PUT requests"""
 
     def __init__ (self, handler, request):
 
@@ -83,18 +85,20 @@ class collector:
 
     def found_terminator (self):
         # set the terminator back to the default
-        self.request.channel.set_terminator ('\r\n\r\n')
-        self.handler.continue_request ("".join(self.data), self.request)
+        self.request.channel.set_terminator (b'\r\n\r\n')
+        # convert the data back to text for processing
+        data = as_string(b''.join(self.data))
+        self.handler.continue_request (data, self.request)
 
 if __name__ == '__main__':
 
     class rpc_demo (xmlrpc_handler):
 
         def call (self, method, params):
-            print 'method="%s" params=%s' % (method, params)
+            print('method="%s" params=%s' % (method, params))
             return "Sure, that works"
 
-    import asyncore_25 as asyncore
+    import supervisor.medusa.asyncore_25 as asyncore
 
     hs = http_server.http_server ('', 8000)
     rpc = rpc_demo()
